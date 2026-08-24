@@ -80,6 +80,7 @@ class Order(Base):
     pickup_location = Column(String(255), nullable=False)
     delivery_location = Column(String(255), nullable=False)
     weight = Column(Integer, nullable=False)
+    distance_km = Column(Integer, default=0)
     deadline = Column(String(50), nullable=False)
     status = Column(String(30), default="pending")
 

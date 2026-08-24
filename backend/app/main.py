@@ -3,7 +3,17 @@ from sqlalchemy import text
 
 from app.database.connection import engine, Base
 from app.database import models
-from app.routes import companies, users, trucks
+from app.routes import (
+    companies,
+    users,
+    trucks,
+    drivers,
+    orders,
+    trips,
+    maintenance,
+    gps,
+    optimization
+)
 
 app = FastAPI(
     title="AI Fleet Optimization API",
@@ -18,6 +28,12 @@ Base.metadata.create_all(bind=engine)
 app.include_router(companies.router)
 app.include_router(users.router)
 app.include_router(trucks.router)
+app.include_router(drivers.router)
+app.include_router(orders.router)
+app.include_router(trips.router)
+app.include_router(maintenance.router)
+app.include_router(gps.router)
+app.include_router(optimization.router)
 
 
 @app.get("/")

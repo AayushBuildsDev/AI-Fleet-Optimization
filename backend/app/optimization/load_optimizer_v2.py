@@ -1,14 +1,12 @@
 from ortools.linear_solver import pywraplp
 
 
-def optimize_loads(trucks, orders):
+def optimize_loads_v2(trucks, orders, fuel_price=90):
     solver = pywraplp.Solver.CreateSolver("SCIP")
 
     if not solver:
         raise RuntimeError("OR-Tools solver could not be created")
 
-    # Decision variable:
-    # x[truck][order] = 1 if order is assigned to truck
     x = {}
 
     for truck in trucks:
@@ -19,7 +17,6 @@ def optimize_loads(trucks, orders):
                 f"x_{truck.id}_{order.id}"
             )
 
-    # Truck used or not
     truck_used = {}
 
     for truck in trucks:
@@ -29,11 +26,7 @@ def optimize_loads(trucks, orders):
             f"truck_used_{truck.id}"
         )
 
-    # -------------------------------------------------
-    # Constraint 1:
     # Every order must be assigned to exactly one truck
-    # -------------------------------------------------
-
     for order in orders:
         solver.Add(
             sum(
@@ -42,11 +35,7 @@ def optimize_loads(trucks, orders):
             ) == 1
         )
 
-    # -------------------------------------------------
-    # Constraint 2:
-    # Total order weight cannot exceed truck capacity
-    # -------------------------------------------------
-
+    # Truck capacity constraint
     for truck in trucks:
         solver.Add(
             sum(
@@ -56,14 +45,31 @@ def optimize_loads(trucks, orders):
             <= truck.capacity * truck_used[truck.id]
         )
 
-    # -------------------------------------------------
     # Objective:
-    # Minimize number of trucks used
-    # -------------------------------------------------
+    # Minimize trucks used + estimated fuel cost
+    objective_terms = []
 
-    solver.Minimize(
-        sum(truck_used[truck.id] for truck in trucks)
-    )
+    for truck in trucks:
+        objective_terms.append(
+            10000 * truck_used[truck.id]
+        )
+
+        for order in orders:
+
+            if truck.fuel_efficiency and truck.fuel_efficiency > 0:
+                fuel_cost = (
+                    order.distance_km
+                    / truck.fuel_efficiency
+                    * fuel_price
+                )
+            else:
+                fuel_cost = 100000
+
+            objective_terms.append(
+                fuel_cost * x[truck.id, order.id]
+            )
+
+    solver.Minimize(sum(objective_terms))
 
     status = solver.Solve()
 
@@ -80,14 +86,34 @@ def optimize_loads(trucks, orders):
 
         for order in orders:
             if x[truck.id, order.id].solution_value() > 0.5:
+
+                if truck.fuel_efficiency and truck.fuel_efficiency > 0:
+                    fuel_used = (
+                        order.distance_km /
+                        truck.fuel_efficiency
+                    )
+                else:
+                    fuel_used = 0
+
+                fuel_cost = fuel_used * fuel_price
+
                 assigned_orders.append({
                     "order_id": order.id,
-                    "weight": order.weight
+                    "weight": order.weight,
+                    "distance_km": order.distance_km,
+                    "fuel_used_liters": round(fuel_used, 2),
+                    "fuel_cost": round(fuel_cost, 2)
                 })
 
         if assigned_orders:
+
             total_weight = sum(
                 order["weight"]
+                for order in assigned_orders
+            )
+
+            total_fuel_cost = sum(
+                order["fuel_cost"]
                 for order in assigned_orders
             )
 
@@ -99,10 +125,15 @@ def optimize_loads(trucks, orders):
                     (total_weight / truck.capacity) * 100,
                     2
                 ),
+                "total_fuel_cost": round(
+                    total_fuel_cost,
+                    2
+                ),
                 "orders": assigned_orders
             })
 
     return {
         "status": "optimal",
+        "fuel_price_per_liter": fuel_price,
         "assignments": assignments
     }
