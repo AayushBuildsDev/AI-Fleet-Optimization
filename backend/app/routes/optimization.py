@@ -256,13 +256,25 @@ def calculate_route(
     }
     for location in result["route"]:
 
-     if location == 0:
-        continue
+       if location == 0:
+           continue
 
-    order_index = location - 1
+       order_index = location - 1
 
-    if order_index < len(orders):
+       if order_index < len(orders):
         order = orders[order_index]
+
+        existing_trip = (
+            db.query(Trip)
+            .filter(
+                Trip.order_id == order.id,
+                Trip.status == "planned"
+            )
+            .first()
+        )
+
+        if existing_trip:
+           continue
 
         trip = Trip(
             truck_id=truck.id,
@@ -278,7 +290,7 @@ def calculate_route(
 
         db.add(trip)
 
-        db.commit()
+    db.commit()
     route_details = []
 
     for location in result["route"]:

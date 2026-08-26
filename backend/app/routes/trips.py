@@ -76,3 +76,44 @@ def get_trip(
         )
 
     return trip
+
+@router.put("/{trip_id}/status")
+def update_trip_status(
+    trip_id: int,
+    status: str,
+    db: Session = Depends(get_db)
+):
+    trip = (
+        db.query(Trip)
+        .filter(Trip.id == trip_id)
+        .first()
+    )
+
+    if not trip:
+        raise HTTPException(
+            status_code=404,
+            detail="Trip not found"
+        )
+
+    allowed_statuses = [
+        "planned",
+        "in_progress",
+        "completed"
+    ]
+
+    if status not in allowed_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid trip status"
+        )
+
+    trip.status = status
+
+    db.commit()
+    db.refresh(trip)
+
+    return {
+        "message": "Trip status updated successfully",
+        "trip_id": trip.id,
+        "status": trip.status
+    }
