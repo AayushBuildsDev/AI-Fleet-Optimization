@@ -1,9 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.database.connection import get_db
 from app.database.models import Order
-
 
 router = APIRouter(
     prefix="/orders",
@@ -18,6 +17,10 @@ def create_order(
     weight: int,
     deadline: str,
     distance_km: int = 0,
+    pickup_latitude: str = None,
+    pickup_longitude: str = None,
+    delivery_latitude: str = None,
+    delivery_longitude: str = None,
     company_id: int = 1,
     db: Session = Depends(get_db)
 ):
@@ -27,6 +30,10 @@ def create_order(
         weight=weight,
         deadline=deadline,
         distance_km=distance_km,
+        pickup_latitude=pickup_latitude,
+        pickup_longitude=pickup_longitude,
+        delivery_latitude=delivery_latitude,
+        delivery_longitude=delivery_longitude,
         company_id=company_id
     )
 
@@ -42,36 +49,19 @@ def create_order(
             "delivery_location": order.delivery_location,
             "weight": order.weight,
             "distance_km": order.distance_km,
+            "pickup_latitude": order.pickup_latitude,
+            "pickup_longitude": order.pickup_longitude,
+            "delivery_latitude": order.delivery_latitude,
+            "delivery_longitude": order.delivery_longitude,
             "deadline": order.deadline,
             "status": order.status,
             "company_id": order.company_id
         }
     }
 
+
 @router.get("/")
 def get_orders(
     db: Session = Depends(get_db)
 ):
-    orders = db.query(Order).all()
-
-    return orders
-
-
-@router.get("/{order_id}")
-def get_order(
-    order_id: int,
-    db: Session = Depends(get_db)
-):
-    order = (
-        db.query(Order)
-        .filter(Order.id == order_id)
-        .first()
-    )
-
-    if not order:
-        raise HTTPException(
-            status_code=404,
-            detail="Order not found"
-        )
-
-    return order
+    return db.query(Order).all()

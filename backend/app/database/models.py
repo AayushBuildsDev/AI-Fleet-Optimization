@@ -81,6 +81,11 @@ class Order(Base):
     delivery_location = Column(String(255), nullable=False)
     weight = Column(Integer, nullable=False)
     distance_km = Column(Integer, default=0)
+    pickup_latitude = Column(String(50))
+    pickup_longitude = Column(String(50))
+
+    delivery_latitude = Column(String(50))
+    delivery_longitude = Column(String(50))
     deadline = Column(String(50), nullable=False)
     status = Column(String(30), default="pending")
 
