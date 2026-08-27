@@ -220,7 +220,19 @@ def calculate_route(
 
     distance_matrix = build_distance_matrix(orders)
 
-    result = optimize_route(distance_matrix)
+    result = optimize_route(
+    distance_matrix,
+    orders,
+    truck.capacity
+)
+    if result["status"] == "route_not_feasible":
+     return {
+        "status": "route_not_feasible",
+        "message": "No feasible route found. Truck capacity may be exceeded.",
+        "truck_id": truck.id,
+        "truck_capacity": truck.capacity,
+        "driver_id": driver.id
+    }
     average_speed_kmh = 50
 
     estimated_driving_hours = (
@@ -256,12 +268,12 @@ def calculate_route(
     }
     for location in result["route"]:
 
-       if location == 0:
-           continue
+      if location == 0:
+        continue
 
-       order_index = location - 1
+      order_index = location - 1
 
-       if order_index < len(orders):
+      if order_index < len(orders):
         order = orders[order_index]
 
         existing_trip = (
@@ -274,21 +286,41 @@ def calculate_route(
         )
 
         if existing_trip:
-           continue
+            continue
+
+        order_distance = order.distance_km or 0
+
+        order_time_hours = (
+            order_distance / average_speed_kmh
+        )
+
+        order_fuel_liters = 0
+
+        if truck.fuel_efficiency and truck.fuel_efficiency > 0:
+            order_fuel_liters = (
+                order_distance / truck.fuel_efficiency
+            )
+
+        order_fuel_cost = (
+            order_fuel_liters * fuel_price
+        )
 
         trip = Trip(
             truck_id=truck.id,
             driver_id=driver.id,
             order_id=order.id,
-            distance=order.distance_km,
+            distance=order_distance,
             estimated_time=int(
-                estimated_driving_hours * 60
+                order_time_hours * 60
             ),
-            fuel_cost=int(fuel_cost),
+            fuel_cost=int(
+                order_fuel_cost
+            ),
             status="planned"
         )
 
         db.add(trip)
+        order.status = "assigned"
 
     db.commit()
     route_details = []

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database.connection import get_db
-from app.database.models import Trip
+from app.database.models import Trip, Order
 
 
 router = APIRouter(
@@ -109,11 +109,28 @@ def update_trip_status(
 
     trip.status = status
 
+    # Find the order associated with this trip
+    order = (
+        db.query(Order)
+        .filter(Order.id == trip.order_id)
+        .first()
+    )
+
+    # Synchronize order status with trip status
+    if order:
+        if status == "in_progress":
+            order.status = "in_progress"
+
+        elif status == "completed":
+            order.status = "completed"
+
     db.commit()
     db.refresh(trip)
 
     return {
         "message": "Trip status updated successfully",
         "trip_id": trip.id,
-        "status": trip.status
+        "order_id": trip.order_id,
+        "trip_status": trip.status,
+        "order_status": order.status if order else None
     }

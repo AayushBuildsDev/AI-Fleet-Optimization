@@ -2,7 +2,7 @@ from ortools.constraint_solver import routing_enums_pb2
 from ortools.constraint_solver import pywrapcp
 
 
-def optimize_route(distance_matrix):
+def optimize_route(distance_matrix, orders, truck_capacity):
     """
     Optimize the visiting order of locations.
 
@@ -20,6 +20,31 @@ def optimize_route(distance_matrix):
 
     # Create routing model
     routing = pywrapcp.RoutingModel(manager)
+    def demand_callback(from_index):
+        from_node = manager.IndexToNode(from_index)
+
+        if from_node == 0:
+         return 0
+
+        order_index = from_node - 1
+
+        if order_index < len(orders):
+         return orders[order_index].weight or 0
+
+        return 0
+
+
+    demand_callback_index = routing.RegisterUnaryTransitCallback(
+      demand_callback
+)
+
+    routing.AddDimensionWithVehicleCapacity(
+      demand_callback_index,
+      0,
+     [truck_capacity],
+     True,
+     "Capacity"
+)
 
     # Distance callback
     def distance_callback(from_index, to_index):
@@ -51,11 +76,12 @@ def optimize_route(distance_matrix):
     )
 
     if not solution:
-        return {
-            "status": "No route found",
-            "route": [],
-            "total_distance": 0
-        }
+     return {
+        "status": "route_not_feasible",
+        "message": "No feasible route found. Truck capacity may be exceeded.",
+        "route": [],
+        "total_distance": 0
+    }
 
     # Build route
     route = []

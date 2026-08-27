@@ -242,6 +242,7 @@ def get_truck_eta(
 @router.get("/{truck_id}/route-deviation")
 def check_route_deviation(
     truck_id: int,
+    deviation_limit_km: int = 50,
     db: Session = Depends(get_db)
 ):
     gps_record = (
@@ -329,7 +330,7 @@ def check_route_deviation(
     remaining_distance = earth_radius * c
 
     # Simple V1 deviation rule
-    deviation_limit_km = 50
+    
 
     # Compare current position with the direct
     # depot-to-delivery distance.
