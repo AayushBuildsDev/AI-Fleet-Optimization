@@ -9,6 +9,7 @@ from app.optimization.load_optimizer_v2 import optimize_loads_v2
 from app.optimization.load_optimizer_v3 import optimize_loads_v3
 from app.optimization.load_optimizer_v4 import optimize_loads_v4
 from app.optimization.route_optimizer import optimize_route
+from app.optimization.fleet_route_optimizer import optimize_fleet_routes
 from app.optimization.distance_matrix import build_distance_matrix
 
 
@@ -368,3 +369,159 @@ def calculate_route(
       2
 ),
 }
+
+#calculate fleet
+@router.get("/fleet-route")
+def calculate_fleet_route(
+    fuel_price: int = 90,
+    db: Session = Depends(get_db)
+):
+    trucks = (
+        db.query(Truck)
+        .filter(Truck.status == "available")
+        .all()
+    )
+
+    drivers = (
+        db.query(Driver)
+        .filter(Driver.status == "available")
+        .all()
+    )
+
+    orders = (
+        db.query(Order)
+        .filter(Order.status == "pending")
+        .all()
+    )
+
+    if not trucks:
+        return {
+            "message": "No available trucks found"
+        }
+
+    if not drivers:
+        return {
+            "message": "No available drivers found"
+        }
+
+    if not orders:
+        return {
+            "message": "No pending orders found"
+        }
+
+    distance_matrix = build_distance_matrix(orders)
+
+    result = optimize_fleet_routes(
+        distance_matrix,
+        orders,
+        trucks
+    )
+
+    if result["status"] == "route_not_feasible":
+        return result
+
+    routes = []
+
+    for route_data in result["routes"]:
+
+        truck = trucks[route_data["truck_index"]]
+
+        driver = drivers[
+            route_data["truck_index"] % len(drivers)
+        ]
+
+        routes.append({
+            "truck_id": truck.id,
+            "truck_registration": truck.registration_number,
+            "truck_capacity": truck.capacity,
+            "driver_id": driver.id,
+            "driver_name": driver.name,
+            "route": route_data["route"],
+            "total_distance": route_data["total_distance"],
+            "total_weight": route_data["total_weight"]
+        })
+
+     # Create Trips for each optimized route
+    for route_data in result["routes"]:
+
+        truck = trucks[route_data["truck_index"]]
+
+        driver = drivers[
+            route_data["truck_index"] % len(drivers)
+        ]
+
+        for location in route_data["route"]:
+
+            if location == 0:
+                continue
+
+            order_index = location - 1
+
+            if order_index >= len(orders):
+                continue
+
+            order = orders[order_index]
+
+            # Prevent duplicate planned trips
+            existing_trip = (
+                db.query(Trip)
+                .filter(
+                    Trip.order_id == order.id,
+                    Trip.status == "planned"
+                )
+                .first()
+            )
+
+            if existing_trip:
+                continue
+
+            order_distance = order.distance_km or 0
+
+            average_speed_kmh = 50
+
+            order_time_hours = (
+                order_distance / average_speed_kmh
+            )
+
+            order_fuel_liters = 0
+
+            if (
+                truck.fuel_efficiency
+                and truck.fuel_efficiency > 0
+            ):
+                order_fuel_liters = (
+                    order_distance
+                    / truck.fuel_efficiency
+                )
+
+            order_fuel_cost = (
+                order_fuel_liters * fuel_price
+            )
+
+            trip = Trip(
+                truck_id=truck.id,
+                driver_id=driver.id,
+                order_id=order.id,
+                distance=order_distance,
+                estimated_time=int(
+                    order_time_hours * 60
+                ),
+                fuel_cost=int(
+                    order_fuel_cost
+                ),
+                status="planned"
+            )
+
+            db.add(trip)
+
+            order.status = "assigned"
+
+    db.commit()       
+
+    return {
+        "status": result["status"],
+        "fuel_price_per_liter": fuel_price,
+        "routes": routes
+    }
+
+   
