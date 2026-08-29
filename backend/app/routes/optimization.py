@@ -403,6 +403,13 @@ def calculate_fleet_route(
         return {
             "message": "No available drivers found"
         }
+    if len(drivers) < len(trucks):
+     return {
+        "status": "fleet_not_feasible",
+        "message": "Not enough available drivers for available trucks",
+        "available_trucks": len(trucks),
+        "available_drivers": len(drivers)
+    }
 
     if not orders:
         return {
@@ -447,8 +454,8 @@ def calculate_fleet_route(
         truck = trucks[route_data["truck_index"]]
 
         driver = drivers[
-            route_data["truck_index"] % len(drivers)
-        ]
+    route_data["truck_index"]
+]
 
         for location in route_data["route"]:
 
@@ -473,7 +480,8 @@ def calculate_fleet_route(
             )
 
             if existing_trip:
-                continue
+               order.status = "assigned"
+               continue
 
             order_distance = order.distance_km or 0
 

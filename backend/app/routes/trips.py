@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database.connection import get_db
-from app.database.models import Trip, Order
+from app.database.models import Trip, Order, Driver
 
 
 router = APIRouter(
@@ -108,6 +108,18 @@ def update_trip_status(
         )
 
     trip.status = status
+
+    driver = (
+    db.query(Driver)
+    .filter(Driver.id == trip.driver_id)
+    .first()
+)
+    if driver:
+     if status == "in_progress":
+        driver.status = "busy"
+
+    elif status == "completed":
+        driver.status = "available"
 
     # Find the order associated with this trip
     order = (
