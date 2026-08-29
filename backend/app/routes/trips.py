@@ -118,7 +118,7 @@ def update_trip_status(
      if status == "in_progress":
         driver.status = "busy"
 
-    elif status == "completed":
+     elif status == "completed":
         driver.status = "available"
 
     # Find the order associated with this trip

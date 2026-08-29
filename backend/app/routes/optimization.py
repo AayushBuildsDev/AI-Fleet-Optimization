@@ -448,6 +448,25 @@ def calculate_fleet_route(
             "total_weight": route_data["total_weight"]
         })
 
+        average_speed_kmh = 50
+
+    estimated_driving_hours = (
+    route_data["total_distance"] / average_speed_kmh
+)
+
+    if estimated_driving_hours > driver.working_hours:
+     return {
+        "status": "fleet_not_feasible",
+        "message": "Driver does not have enough working hours",
+        "truck_id": truck.id,
+        "driver_id": driver.id,
+        "driver_working_hours": driver.working_hours,
+        "estimated_driving_hours": round(
+            estimated_driving_hours,
+            2
+        )
+    }
+
      # Create Trips for each optimized route
     for route_data in result["routes"]:
 
