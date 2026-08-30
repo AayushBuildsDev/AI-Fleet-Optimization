@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -322,6 +323,7 @@ def calculate_route(
 
         db.add(trip)
         order.status = "assigned"
+        truck.status = "assigned"
 
     db.commit()
     route_details = []
@@ -434,8 +436,57 @@ def calculate_fleet_route(
         truck = trucks[route_data["truck_index"]]
 
         driver = drivers[
-            route_data["truck_index"] % len(drivers)
-        ]
+    route_data["truck_index"]
+]
+
+        average_speed_kmh = 50
+
+        estimated_driving_hours = (
+            route_data["total_distance"]
+            / average_speed_kmh
+        )
+
+        if estimated_driving_hours > driver.working_hours:
+            return {
+                "status": "fleet_not_feasible",
+                "message": "Driver does not have enough working hours",
+                "truck_id": truck.id,
+                "driver_id": driver.id,
+                "driver_working_hours": driver.working_hours,
+                "estimated_driving_hours": round(
+                    estimated_driving_hours,
+                    2
+                )
+            }
+
+                # Calculate fuel usage and cost
+        if truck.fuel_efficiency and truck.fuel_efficiency > 0:
+            fuel_used_liters = (
+                route_data["total_distance"]
+                / truck.fuel_efficiency
+            )
+
+            fuel_cost = (
+                fuel_used_liters
+                * fuel_price
+            )
+        else:
+            fuel_used_liters = 0
+            fuel_cost = 0
+
+        # Get order IDs included in this route
+        route_order_ids = []
+
+        for location in route_data["route"]:
+            if location == 0:
+                continue
+
+            order_index = location - 1
+
+            if order_index < len(orders):
+                route_order_ids.append(
+                    orders[order_index].id
+                )
 
         routes.append({
             "truck_id": truck.id,
@@ -444,28 +495,23 @@ def calculate_fleet_route(
             "driver_id": driver.id,
             "driver_name": driver.name,
             "route": route_data["route"],
+            "order_ids": route_order_ids,
+            "order_count": len(route_order_ids),
             "total_distance": route_data["total_distance"],
-            "total_weight": route_data["total_weight"]
+            "total_weight": route_data["total_weight"],
+            "estimated_driving_hours": round(
+                estimated_driving_hours,
+                2
+            ),
+            "fuel_used_liters": round(
+                fuel_used_liters,
+                2
+            ),
+            "fuel_cost": round(
+                fuel_cost,
+                2
+            )
         })
-
-        average_speed_kmh = 50
-
-    estimated_driving_hours = (
-    route_data["total_distance"] / average_speed_kmh
-)
-
-    if estimated_driving_hours > driver.working_hours:
-     return {
-        "status": "fleet_not_feasible",
-        "message": "Driver does not have enough working hours",
-        "truck_id": truck.id,
-        "driver_id": driver.id,
-        "driver_working_hours": driver.working_hours,
-        "estimated_driving_hours": round(
-            estimated_driving_hours,
-            2
-        )
-    }
 
      # Create Trips for each optimized route
     for route_data in result["routes"]:
@@ -488,6 +534,41 @@ def calculate_fleet_route(
 
             order = orders[order_index]
 
+                        # Check order deadline
+            try:
+             deadline_string = order.deadline.strip()
+
+             deadline = datetime.fromisoformat(
+             deadline_string
+           )
+            except ValueError:
+                return {
+                    "status": "invalid_order_deadline",
+                    "message": "Invalid deadline format",
+                    "order_id": order.id,
+                    "deadline": order.deadline
+                }
+
+            order_time_hours = (
+                (order.distance_km or 0)
+                / average_speed_kmh
+            )
+
+            estimated_delivery_time = (
+                datetime.now()
+                + timedelta(hours=order_time_hours)
+            )
+
+            if estimated_delivery_time > deadline:
+                return {
+                    "status": "fleet_not_feasible",
+                    "message": "Order cannot be delivered before deadline",
+                    "order_id": order.id,
+                    "deadline": order.deadline,
+                    "estimated_delivery_time": (
+                        estimated_delivery_time.isoformat()
+                    )
+                }        
             # Prevent duplicate planned trips
             existing_trip = (
                 db.query(Trip)
@@ -500,6 +581,7 @@ def calculate_fleet_route(
 
             if existing_trip:
                order.status = "assigned"
+               truck.status = "assigned"
                continue
 
             order_distance = order.distance_km or 0

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database.connection import get_db
-from app.database.models import Trip, Order, Driver
+from app.database.models import Trip, Order, Driver, Truck
 
 
 router = APIRouter(
@@ -120,6 +120,25 @@ def update_trip_status(
 
      elif status == "completed":
         driver.status = "available"
+
+        truck = (
+    db.query(Truck)
+    .filter(Truck.id == trip.truck_id)
+    .first()
+)
+
+    truck = (
+    db.query(Truck)
+    .filter(Truck.id == trip.truck_id)
+    .first()
+)
+
+    if truck:
+       if status == "in_progress":
+        truck.status = "assigned"
+
+       elif status == "completed":
+         truck.status = "available"
 
     # Find the order associated with this trip
     order = (
