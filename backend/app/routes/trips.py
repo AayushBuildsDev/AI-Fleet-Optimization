@@ -77,6 +77,111 @@ def get_trip(
 
     return trip
 
+@router.get("/")
+def get_all_trips(
+    db: Session = Depends(get_db)
+):
+    trips = (
+        db.query(Trip)
+        .all()
+    )
+
+    return trips
+
+@router.get("/truck/{truck_id}")
+def get_trips_by_truck(
+    truck_id: int,
+    db: Session = Depends(get_db)
+):
+    truck = (
+        db.query(Truck)
+        .filter(Truck.id == truck_id)
+        .first()
+    )
+
+    if not truck:
+        raise HTTPException(
+            status_code=404,
+            detail="Truck not found"
+        )
+
+    trips = (
+        db.query(Trip)
+        .filter(Trip.truck_id == truck_id)
+        .all()
+    )
+
+    return trips
+
+@router.get("/driver/{driver_id}")
+def get_trips_by_driver(
+    driver_id: int,
+    db: Session = Depends(get_db)
+):
+    driver = (
+        db.query(Driver)
+        .filter(Driver.id == driver_id)
+        .first()
+    )
+
+    if not driver:
+        raise HTTPException(
+            status_code=404,
+            detail="Driver not found"
+        )
+
+    trips = (
+        db.query(Trip)
+        .filter(Trip.driver_id == driver_id)
+        .all()
+    )
+
+    return trips
+
+@router.get("/order/{order_id}")
+def get_trips_by_order(
+    order_id: int,
+    db: Session = Depends(get_db)
+):
+    order = (
+        db.query(Order)
+        .filter(Order.id == order_id)
+        .first()
+    )
+
+    if not order:
+        raise HTTPException(
+            status_code=404,
+            detail="Order not found"
+        )
+
+    trips = (
+        db.query(Trip)
+        .filter(Trip.order_id == order_id)
+        .all()
+    )
+
+    return trips
+
+@router.get("/{trip_id}")
+def get_trip(
+    trip_id: int,
+    db: Session = Depends(get_db)
+):
+    trip = (
+        db.query(Trip)
+        .filter(Trip.id == trip_id)
+        .first()
+    )
+
+    if not trip:
+        raise HTTPException(
+            status_code=404,
+            detail="Trip not found"
+        )
+
+    return trip
+
 @router.put("/{trip_id}/status")
 def update_trip_status(
     trip_id: int,
@@ -115,30 +220,24 @@ def update_trip_status(
     .first()
 )
     if driver:
-     if status == "in_progress":
-        driver.status = "busy"
+        if status == "in_progress":
+            driver.status = "busy"
 
-     elif status == "completed":
-        driver.status = "available"
-
-        truck = (
-    db.query(Truck)
-    .filter(Truck.id == trip.truck_id)
-    .first()
-)
+        elif status == "completed":
+            driver.status = "available"
 
     truck = (
-    db.query(Truck)
-    .filter(Truck.id == trip.truck_id)
-    .first()
-)
+        db.query(Truck)
+        .filter(Truck.id == trip.truck_id)
+        .first()
+    )
 
     if truck:
-       if status == "in_progress":
-        truck.status = "assigned"
+        if status == "in_progress":
+            truck.status = "assigned"
 
-       elif status == "completed":
-         truck.status = "available"
+        elif status == "completed":
+            truck.status = "available"
 
     # Find the order associated with this trip
     order = (
