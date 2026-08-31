@@ -212,6 +212,22 @@ def update_trip_status(
             detail="Invalid trip status"
         )
 
+        # Validate trip status transition
+    valid_transitions = {
+        "planned": ["in_progress"],
+        "in_progress": ["completed"],
+        "completed": []
+    }
+
+    if status not in valid_transitions.get(trip.status, []):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid status transition: "
+                f"{trip.status} → {status}"
+            )
+        )
+
     trip.status = status
 
     driver = (

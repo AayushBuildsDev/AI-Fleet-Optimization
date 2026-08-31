@@ -12,7 +12,8 @@ from app.routes import (
     trips,
     maintenance,
     gps,
-    optimization
+    optimization,
+    dashboard
 )
 
 app = FastAPI(
@@ -34,6 +35,7 @@ app.include_router(trips.router)
 app.include_router(maintenance.router)
 app.include_router(gps.router)
 app.include_router(optimization.router)
+app.include_router(dashboard.router)
 
 
 @app.get("/")
