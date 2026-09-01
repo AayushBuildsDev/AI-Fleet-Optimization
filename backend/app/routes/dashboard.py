@@ -2,7 +2,13 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.database.connection import get_db
-from app.database.models import Truck, Driver, Order, Trip
+from app.database.models import (
+    Truck,
+    Driver,
+    Order,
+    Trip,
+    GPSTracking
+)
 
 
 router = APIRouter(
@@ -91,3 +97,52 @@ def get_dashboard_summary(
         "completed_orders": completed_orders,
         "active_trips": active_trips
     }
+
+@router.get("/active-trips")
+def get_active_trips(
+    db: Session = Depends(get_db)
+):
+    trips = (
+        db.query(Trip)
+        .filter(Trip.status == "in_progress")
+        .all()
+    )
+
+    active_trips = []
+
+    for trip in trips:
+
+        gps_record = (
+            db.query(GPSTracking)
+            .filter(
+                GPSTracking.truck_id == trip.truck_id
+            )
+            .order_by(GPSTracking.id.desc())
+            .first()
+        )
+
+        active_trips.append({
+            "trip_id": trip.id,
+            "order_id": trip.order_id,
+            "truck_id": trip.truck_id,
+            "driver_id": trip.driver_id,
+            "trip_status": trip.status,
+            "latitude": (
+                gps_record.latitude
+                if gps_record else None
+            ),
+            "longitude": (
+                gps_record.longitude
+                if gps_record else None
+            ),
+            "speed": (
+                gps_record.speed
+                if gps_record else None
+            ),
+            "timestamp": (
+                gps_record.timestamp
+                if gps_record else None
+            )
+        })
+
+    return active_trips
