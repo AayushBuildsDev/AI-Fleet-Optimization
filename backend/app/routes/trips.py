@@ -50,34 +50,6 @@ def create_trip(
 
 
 @router.get("/")
-def get_trips(
-    db: Session = Depends(get_db)
-):
-    trips = db.query(Trip).all()
-
-    return trips
-
-
-@router.get("/{trip_id}")
-def get_trip(
-    trip_id: int,
-    db: Session = Depends(get_db)
-):
-    trip = (
-        db.query(Trip)
-        .filter(Trip.id == trip_id)
-        .first()
-    )
-
-    if not trip:
-        raise HTTPException(
-            status_code=404,
-            detail="Trip not found"
-        )
-
-    return trip
-
-@router.get("/")
 def get_all_trips(
     db: Session = Depends(get_db)
 ):

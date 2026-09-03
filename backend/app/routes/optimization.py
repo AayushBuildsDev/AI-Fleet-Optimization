@@ -23,11 +23,18 @@ router = APIRouter(
 # V1
 @router.get("/load-allocation")
 def load_allocation(
+    fuel_price: int = 90,
     db: Session = Depends(get_db)
 ):
     trucks = (
         db.query(Truck)
         .filter(Truck.status == "available")
+        .all()
+    )
+
+    drivers = (
+        db.query(Driver)
+        .filter(Driver.status == "available")
         .all()
     )
 
@@ -42,21 +49,28 @@ def load_allocation(
             "message": "No available trucks found"
         }
 
+    if not drivers:
+        return {
+            "message": "No available drivers found"
+        }
+
     if not orders:
         return {
             "message": "No pending orders found"
         }
 
-    result = optimize_loads(
+    result = optimize_loads_v4(
         trucks,
-        orders
+        drivers,
+        orders,
+        fuel_price
     )
 
     return result
 
 
 # V2 — Fuel-aware optimization
-@router.get("/load-allocation-v2")
+@router.get("/load-allocation-v2", include_in_schema=False)
 def load_allocation_v2(
     fuel_price: int = 90,
     db: Session = Depends(get_db)
@@ -92,7 +106,7 @@ def load_allocation_v2(
     return result
 
 #v3
-@router.get("/load-allocation-v3")
+@router.get("/load-allocation-v3", include_in_schema=False)
 def load_allocation_v3(
     fuel_price: int = 90,
     db: Session = Depends(get_db)
@@ -128,7 +142,7 @@ def load_allocation_v3(
     return result
 
 #v4
-@router.get("/load-allocation-v4")
+@router.get("/load-allocation-v4", include_in_schema=False)
 def load_allocation_v4(
     fuel_price: int = 90,
     db: Session = Depends(get_db)
@@ -176,7 +190,7 @@ def load_allocation_v4(
     return result
 
 #route
-@router.get("/route")
+@router.post("/route")
 def calculate_route(
     truck_id: int = 1,
     driver_id: int = 1,
@@ -373,7 +387,7 @@ def calculate_route(
 }
 
 #calculate fleet
-@router.get("/fleet-route")
+@router.post("/fleet-route")
 def calculate_fleet_route(
     fuel_price: int = 90,
     db: Session = Depends(get_db)

@@ -38,14 +38,14 @@ app.include_router(optimization.router)
 app.include_router(dashboard.router)
 
 
-@app.get("/")
+@app.get("/", tags=["System"])
 def home():
     return {
         "message": "AI Fleet Optimization API is running"
     }
 
 
-@app.get("/test-db")
+@app.get("/test-db", tags=["System"])
 def test_database():
     try:
         with engine.connect() as connection:

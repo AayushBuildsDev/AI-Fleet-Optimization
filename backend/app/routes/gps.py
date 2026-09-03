@@ -15,9 +15,9 @@ router = APIRouter(
 @router.post("/")
 def create_gps_record(
     truck_id: int,
-    latitude: str,
-    longitude: str,
-    speed: int = 0,
+    latitude: float,
+    longitude: float,
+    speed: float = 0,
     timestamp: str = "",
     db: Session = Depends(get_db)
 ):
