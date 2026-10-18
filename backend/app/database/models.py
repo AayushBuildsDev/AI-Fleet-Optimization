@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, JSON
 from sqlalchemy.orm import relationship
 
 from app.database.connection import Base
@@ -112,6 +112,8 @@ class Trip(Base):
     truck = relationship("Truck", back_populates="trips")
     driver = relationship("Driver", back_populates="trips")
     order = relationship("Order", back_populates="trips")
+
+    daily_schedule = Column(JSON, nullable=True)
 
 
 class Maintenance(Base):
