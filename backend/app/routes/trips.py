@@ -1,13 +1,164 @@
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.optimization.multi_day_scheduler import schedule_multi_day_trip
+from app.optimization.driver_rotation import build_driver_rotation_schedule
 from app.database.connection import get_db
-from app.database.models import Trip, Order, Driver, Truck
+from app.database.models import (
+    Trip,
+    Order,
+    Driver,
+    Truck,
+    TripDriverAssignment,
+)
 
 router = APIRouter(
     prefix="/trips",
     tags=["Trips"]
 )
+class DriverAssignmentCreate(BaseModel):
+    driver_id: int
+    segment_start_km: float = Field(ge=0)
+    segment_end_km: float = Field(gt=0)
+    start_time: datetime
+    end_time: datetime
+
+class AutomaticDriverAllocation(BaseModel):
+    start_datetime: datetime
+
+class TripTruckUpdate(BaseModel):
+    truck_id: int = Field(gt=0)
+
+@router.patch("/{trip_id}/truck")
+def update_trip_truck(
+    trip_id: int,
+    request: TripTruckUpdate,
+    db: Session = Depends(get_db),
+):
+    # 1. Find the trip.
+    trip = db.query(Trip).filter(
+        Trip.id == trip_id
+    ).first()
+
+    if not trip:
+        raise HTTPException(
+            status_code=404,
+            detail="Trip not found",
+        )
+
+    # 2. Do not change the truck after driver
+    # rotation assignments have been saved.
+    existing_assignment = db.query(
+        TripDriverAssignment
+    ).filter(
+        TripDriverAssignment.trip_id == trip_id
+    ).first()
+
+    if existing_assignment:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Trip already has driver assignments. "
+                "Truck cannot be changed."
+            ),
+        )
+
+    # 3. Find the order and its company.
+    order = db.query(Order).filter(
+        Order.id == trip.order_id
+    ).first()
+
+    if not order or not order.company_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Trip order is not linked to a company.",
+        )
+
+    # 4. Find the requested truck.
+    truck = db.query(Truck).filter(
+        Truck.id == request.truck_id
+    ).first()
+
+    if not truck:
+        raise HTTPException(
+            status_code=404,
+            detail="Truck not found",
+        )
+
+    # 5. Verify company ownership.
+    if truck.company_id != order.company_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Truck must belong to the order's company.",
+        )
+
+    # 6. Verify truck capacity.
+    if (truck.capacity or 0) < (order.weight or 0):
+        raise HTTPException(
+            status_code=409,
+            detail="Truck capacity is insufficient for this order.",
+        )
+
+    # 7. Check whether another active trip reserves this truck.
+    active_statuses = ["planned", "in_progress"]
+
+    busy_trip = db.query(Trip).filter(
+        Trip.truck_id == truck.id,
+        Trip.id != trip.id,
+        Trip.status.in_(active_statuses),
+    ).first()
+
+    if busy_trip:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Truck is already reserved by trip "
+                f"{busy_trip.id}."
+            ),
+        )
+
+    # 8. Update and commit.
+    old_truck_id = trip.truck_id
+    trip.truck_id = truck.id
+
+    try:
+        db.commit()
+        db.refresh(trip)
+    except Exception:
+        db.rollback()
+        raise
+
+    # Release the old truck only if no other active trip uses it.
+    if old_truck_id != truck.id:
+        old_truck = db.query(Truck).filter(
+            Truck.id == old_truck_id
+        ).first()
+
+        if old_truck:
+            other_old_truck_trip = db.query(Trip).filter(
+                Trip.truck_id == old_truck_id,
+                Trip.status.in_(active_statuses),
+            ).first()
+
+            if not other_old_truck_trip:
+                old_truck.status = "available"
+                db.commit()
+
+    # Mark the new truck as assigned for an active trip.
+    if trip.status in active_statuses:
+        truck.status = "assigned"
+        db.commit()
+
+    return {
+        "message": "Trip truck updated successfully",
+        "trip_id": trip.id,
+        "old_truck_id": old_truck_id,
+        "new_truck_id": trip.truck_id,
+        "order_id": trip.order_id,
+        "company_id": order.company_id,
+    }
+
 
 #     # 1. Check that the truck exists
 #     truck = db.query(Truck).filter(
@@ -477,3 +628,500 @@ def update_trip_status(
         "driver_status": driver.status if driver else None,
         "order_status": order.status if order else None
     }
+
+
+@router.post("/{trip_id}/driver-assignments")
+def create_driver_assignment(
+    trip_id: int,
+    assignment_data: DriverAssignmentCreate,
+    db: Session = Depends(get_db)
+):
+    # 1. Check that the trip exists
+    trip = db.query(Trip).filter(
+        Trip.id == trip_id
+    ).first()
+
+    if not trip:
+        raise HTTPException(
+            status_code=404,
+            detail="Trip not found"
+        )
+
+    # 2. Validate the segment boundaries
+    if trip.distance is None or trip.distance <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Trip must have a positive distance"
+        )
+        existing_trip_assignments = db.query(TripDriverAssignment).filter(
+        TripDriverAssignment.trip_id == trip_id
+    ).first()
+
+        if existing_trip_assignments:
+         raise HTTPException(
+            status_code=409,
+            detail=(
+                "This trip already has driver assignments. "
+                "Review or remove them before running auto-allocation again."
+            ),
+        )
+
+    if assignment_data.segment_end_km <= assignment_data.segment_start_km:
+        raise HTTPException(
+            status_code=400,
+            detail="Segment end must be greater than segment start"
+        )
+
+    if assignment_data.segment_end_km > trip.distance:
+        raise HTTPException(
+            status_code=400,
+            detail="Segment cannot exceed the trip distance"
+        )
+
+    if assignment_data.end_time <= assignment_data.start_time:
+        raise HTTPException(
+            status_code=400,
+            detail="End time must be after start time"
+        )
+
+    # 3. Check that the driver exists and is available
+    driver = db.query(Driver).filter(
+        Driver.id == assignment_data.driver_id
+    ).first()
+
+    if not driver:
+        raise HTTPException(
+            status_code=404,
+            detail="Driver not found"
+        )
+
+    if driver.status != "available":
+        raise HTTPException(
+            status_code=409,
+            detail="Driver is not marked as available"
+        )
+
+    # 4. Prevent overlapping segments for the same driver
+    existing_assignments = db.query(
+        TripDriverAssignment
+    ).filter(
+        TripDriverAssignment.driver_id == driver.id,
+        TripDriverAssignment.status.in_(["planned", "in_progress"])
+    ).all()
+
+    for existing in existing_assignments:
+      existing_start = datetime.fromisoformat(existing.start_time)
+      existing_end = datetime.fromisoformat(existing.end_time)
+
+    if (
+        assignment_data.start_time < existing_end
+        and assignment_data.end_time > existing_start
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Driver already has an overlapping assignment"
+        )
+    # 5. Prevent overlapping distance segments on this trip
+    trip_assignments = db.query(
+        TripDriverAssignment
+    ).filter(
+        TripDriverAssignment.trip_id == trip_id,
+        TripDriverAssignment.status.in_(["planned", "in_progress"])
+    ).all()
+
+    for existing in trip_assignments:
+        if (
+            assignment_data.segment_start_km < existing.segment_end_km
+            and assignment_data.segment_end_km > existing.segment_start_km
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="This distance segment is already assigned"
+            )
+
+    # 6. Save the assignment
+    assignment = TripDriverAssignment(
+        trip_id=trip_id,
+        driver_id=driver.id,
+        segment_start_km=assignment_data.segment_start_km,
+        segment_end_km=assignment_data.segment_end_km,
+        start_time=assignment_data.start_time.isoformat(),
+        end_time=assignment_data.end_time.isoformat(),
+        status="planned"
+    )
+
+    try:
+        db.add(assignment)
+        db.commit()
+        db.refresh(assignment)
+    except Exception:
+        db.rollback()
+        raise
+
+    return {
+        "message": "Driver assigned to trip segment successfully",
+        "assignment": {
+            "id": assignment.id,
+            "trip_id": assignment.trip_id,
+            "driver_id": assignment.driver_id,
+            "segment_start_km": assignment.segment_start_km,
+            "segment_end_km": assignment.segment_end_km,
+            "start_time": assignment.start_time,
+            "end_time": assignment.end_time,
+            "status": assignment.status
+        }
+    }
+
+
+@router.get("/{trip_id}/driver-assignments")
+def get_trip_driver_assignments(
+    trip_id: int,
+    db: Session = Depends(get_db)
+):
+    trip = db.query(Trip).filter(
+        Trip.id == trip_id
+    ).first()
+
+    if not trip:
+        raise HTTPException(
+            status_code=404,
+            detail="Trip not found"
+        )
+
+    assignments = db.query(
+        TripDriverAssignment
+    ).filter(
+        TripDriverAssignment.trip_id == trip_id
+    ).order_by(
+        TripDriverAssignment.segment_start_km
+    ).all()
+
+    return [
+        {
+            "id": assignment.id,
+            "trip_id": assignment.trip_id,
+            "driver_id": assignment.driver_id,
+            "segment_start_km": assignment.segment_start_km,
+            "segment_end_km": assignment.segment_end_km,
+            "start_time": assignment.start_time,
+            "end_time": assignment.end_time,
+            "status": assignment.status
+        }
+        for assignment in assignments
+    ]
+
+
+@router.get("/drivers/{driver_id}/assignments")
+def get_driver_assignments(
+    driver_id: int,
+    db: Session = Depends(get_db),
+):
+    driver = db.query(Driver).filter(
+        Driver.id == driver_id
+    ).first()
+
+    if not driver:
+        raise HTTPException(
+            status_code=404,
+            detail="Driver not found",
+        )
+
+    assignments = (
+        db.query(TripDriverAssignment)
+        .filter(
+            TripDriverAssignment.driver_id == driver_id,
+            TripDriverAssignment.status.in_(
+                ["planned", "in_progress"]
+            ),
+        )
+        .order_by(TripDriverAssignment.start_time)
+        .all()
+    )
+
+    return [
+        {
+            "id": assignment.id,
+            "trip_id": assignment.trip_id,
+            "driver_id": assignment.driver_id,
+            "segment_start_km": assignment.segment_start_km,
+            "segment_end_km": assignment.segment_end_km,
+            "start_time": assignment.start_time,
+            "end_time": assignment.end_time,
+            "status": assignment.status,
+        }
+        for assignment in assignments
+    ]
+
+@router.delete("/{trip_id}/driver-assignments/{assignment_id}")
+def delete_trip_driver_assignment(
+    trip_id: int,
+    assignment_id: int,
+    db: Session = Depends(get_db)
+):
+    trip = db.query(Trip).filter(
+        Trip.id == trip_id
+    ).first()
+
+    if not trip:
+        raise HTTPException(
+            status_code=404,
+            detail="Trip not found"
+        )
+
+    assignment = db.query(
+        TripDriverAssignment
+    ).filter(
+        TripDriverAssignment.id == assignment_id,
+        TripDriverAssignment.trip_id == trip_id
+    ).first()
+
+    if not assignment:
+        raise HTTPException(
+            status_code=404,
+            detail="Driver assignment not found for this trip"
+        )
+
+    db.delete(assignment)
+    db.commit()
+
+    return {
+        "message": "Driver assignment deleted successfully",
+        "trip_id": trip_id,
+        "assignment_id": assignment_id
+    }
+
+@router.post("/{trip_id}/auto-allocate-drivers")
+def auto_allocate_drivers(
+    trip_id: int,
+    request: AutomaticDriverAllocation,
+    db: Session = Depends(get_db),
+):
+    trip = db.query(Trip).filter(Trip.id == trip_id).first()
+
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+
+    if trip.distance is None or trip.distance <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Trip distance must be positive",
+        )
+
+    existing_trip_assignment = (
+        db.query(TripDriverAssignment)
+        .filter(TripDriverAssignment.trip_id == trip_id)
+        .first()
+    )
+
+    if existing_trip_assignment:
+        raise HTTPException(
+            status_code=409,
+            detail="This trip already has driver assignments.",
+        )
+
+
+    average_speed_kmh = 50.0
+    daily_limit_hours = 8.0
+
+    # Validate the trip's company.
+    if not trip.order or not trip.order.company_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Trip's order is not linked to a company.",
+        )
+
+    trip_company_id = trip.order.company_id
+
+    # Ensure the truck belongs to the same company.
+    if (
+        not trip.truck
+        or trip.truck.company_id != trip_company_id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Trip's truck must belong to the trip's company.",
+        )
+
+    # Select available drivers from this company only.
+    drivers = (
+        db.query(Driver)
+        .filter(
+            Driver.status == "available",
+            Driver.company_id == trip_company_id,
+        )
+        .order_by(
+            Driver.working_hours.desc(),
+            Driver.id.asc(),
+        )
+        .all()
+    )
+
+    # Include the primary driver if eligible and not already selected.
+    primary_driver = (
+        db.query(Driver)
+        .filter(
+            Driver.id == trip.driver_id,
+            Driver.status == "available",
+            Driver.company_id == trip_company_id,
+        )
+        .first()
+    )
+
+    if (
+        primary_driver
+        and all(d.id != primary_driver.id for d in drivers)
+    ):
+        drivers.append(primary_driver)
+
+    if not drivers:
+        raise HTTPException(
+            status_code=409,
+            detail="No available drivers found for this company.",
+        )
+
+
+
+
+    # Load existing assignments for conflict and daily-hour checks.
+    existing_assignments_by_driver = {}
+    existing_driving_hours_by_driver = {}
+
+    try:
+        for driver in drivers:
+            existing_assignments = (
+                db.query(TripDriverAssignment)
+                .filter(
+                    TripDriverAssignment.driver_id == driver.id,
+                    TripDriverAssignment.status.in_(
+                        ["planned", "in_progress"]
+                    ),
+                )
+                .all()
+            )
+
+            windows = []
+            driving_records = []
+
+            for existing in existing_assignments:
+                try:
+                    existing_start = datetime.fromisoformat(
+                        existing.start_time
+                    )
+                    existing_end = datetime.fromisoformat(
+                        existing.end_time
+                    )
+                except (ValueError, TypeError):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "An existing driver assignment "
+                            "has an invalid time."
+                        ),
+                    )
+
+                if existing_end <= existing_start:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "An existing driver assignment "
+                            "has an invalid time range."
+                        ),
+                    )
+
+                # Preserve the existing conflict-checking windows.
+                windows.append(
+                    (existing_start, existing_end)
+                )
+
+                # Calculate elapsed hours for the assignment.
+                driving_records.append(
+                    {
+                        "start": existing_start,
+                        "end": existing_end,
+                        "hours": (
+                            existing_end - existing_start
+                        ).total_seconds() / 3600,
+                    }
+                )
+
+            existing_assignments_by_driver[driver.id] = windows
+
+            existing_driving_hours_by_driver[driver.id] = (
+                driving_records
+            )
+
+
+        # Generate the rotation schedule.
+
+        schedule = build_driver_rotation_schedule(
+            distance_km=float(trip.distance),
+            drivers=drivers,
+            start_datetime=request.start_datetime,
+            average_speed_kmh=average_speed_kmh,
+            daily_limit_hours=daily_limit_hours,
+            existing_assignments_by_driver=(
+                existing_assignments_by_driver
+            ),
+            existing_driving_hours_by_driver=(
+                existing_driving_hours_by_driver
+            ),
+        )
+
+        if not schedule["complete"]:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Insufficient eligible driver hours.",
+                    "trip_id": trip.id,
+                    "distance_km": trip.distance,
+                    "covered_distance_km": (
+                        schedule["covered_distance_km"]
+                    ),
+                    "uncovered_distance_km": (
+                        schedule["uncovered_distance_km"]
+                    ),
+                },
+            )
+
+        # Save the generated segments.
+        assignments = []
+
+        for item in schedule["assignments"]:
+            assignment = TripDriverAssignment(
+                trip_id=trip.id,
+                driver_id=item["driver_id"],
+                segment_start_km=item["segment_start_km"],
+                segment_end_km=item["segment_end_km"],
+                start_time=item["start_time"],
+                end_time=item["end_time"],
+                status="planned",
+            )
+            db.add(assignment)
+            assignments.append(assignment)
+
+        db.commit()
+
+        for assignment in assignments:
+            db.refresh(assignment)
+
+            return {
+                   "message": "Drivers allocated successfully",
+                   "trip_id": trip.id,
+                   "total_distance_km": trip.distance,
+                   "assignments": [
+                       {
+                           "id": assignment.id,
+                           "driver_id": assignment.driver_id,
+                           "segment_start_km": assignment.segment_start_km,
+                           "segment_end_km": assignment.segment_end_km,
+                           "start_time": assignment.start_time,
+                           "end_time": assignment.end_time,
+                           "status": assignment.status,
+                       }
+                       for assignment in assignments
+                   ],
+               }
+
+    except Exception:
+        db.rollback()
+        raise

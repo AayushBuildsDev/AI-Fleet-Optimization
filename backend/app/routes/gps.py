@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-
+from datetime import datetime, timezone
+from app.optimization.road_route import get_road_route
 from app.database.connection import get_db
 from app.database.models import GPSTracking, Trip, Order
 from math import radians, sin, cos, sqrt, atan2
@@ -10,6 +11,48 @@ router = APIRouter(
     prefix="/gps",
     tags=["GPS Tracking"]
 )
+
+def distance_to_segment_km(
+    point_lat,
+    point_lon,
+    start_lat,
+    start_lon,
+    end_lat,
+    end_lon
+):
+    """Shortest approximate distance from a GPS point to a route segment."""
+
+    # Convert longitude differences to kilometres at this latitude.
+    km_per_degree_lat = 111.32
+    km_per_degree_lon = (
+        111.32 * cos(radians(point_lat))
+    )
+
+    px = (point_lon - start_lon) * km_per_degree_lon
+    py = (point_lat - start_lat) * km_per_degree_lat
+
+    sx = 0.0
+    sy = 0.0
+
+    ex = (end_lon - start_lon) * km_per_degree_lon
+    ey = (end_lat - start_lat) * km_per_degree_lat
+
+    segment_length_squared = ex * ex + ey * ey
+
+    if segment_length_squared == 0:
+        return sqrt(px * px + py * py)
+
+    # Project the GPS point onto the segment.
+    t = (px * ex + py * ey) / segment_length_squared
+    t = max(0.0, min(1.0, t))
+
+    nearest_x = sx + t * ex
+    nearest_y = sy + t * ey
+
+    dx = px - nearest_x
+    dy = py - nearest_y
+
+    return sqrt(dx * dx + dy * dy)
 
 
 @router.post("/")
@@ -21,30 +64,74 @@ def create_gps_record(
     timestamp: str = "",
     db: Session = Depends(get_db)
 ):
+    # Validate GPS coordinates
+    if not -90 <= latitude <= 90:
+        raise HTTPException(
+            status_code=400,
+            detail="Latitude must be between -90 and 90"
+        )
+
+    if not -180 <= longitude <= 180:
+        raise HTTPException(
+            status_code=400,
+            detail="Longitude must be between -180 and 180"
+        )
+
+    if speed < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Speed cannot be negative"
+        )
+
+    # Verify that the truck exists
+    from app.database.models import Truck
+
+    truck = db.query(Truck).filter(
+        Truck.id == truck_id
+    ).first()
+
+    if not truck:
+        raise HTTPException(
+            status_code=404,
+            detail="Truck not found"
+        )
+
+    # Generate a timestamp if none was supplied
+    if not timestamp:
+        timestamp = datetime.now(
+            timezone.utc
+        ).isoformat()
+
     gps_record = GPSTracking(
         truck_id=truck_id,
-        latitude=latitude,
-        longitude=longitude,
+        latitude=str(latitude),
+        longitude=str(longitude),
         speed=speed,
         timestamp=timestamp
     )
 
-    db.add(gps_record)
-    db.commit()
-    db.refresh(gps_record)
+    try:
+        db.add(gps_record)
+        db.commit()
+        db.refresh(gps_record)
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to save GPS record"
+        )
 
     return {
         "message": "GPS record created successfully",
         "gps": {
             "id": gps_record.id,
             "truck_id": gps_record.truck_id,
-            "latitude": gps_record.latitude,
-            "longitude": gps_record.longitude,
+            "latitude": float(gps_record.latitude),
+            "longitude": float(gps_record.longitude),
             "speed": gps_record.speed,
             "timestamp": gps_record.timestamp
         }
     }
-
 
 @router.get("/")
 def get_gps_records(
@@ -230,8 +317,10 @@ def get_truck_eta(
             remaining_distance,
             2
         ),
-        "estimated_time_minutes": round(
-            estimated_minutes
+               "estimated_time_minutes": (
+            max(1, round(estimated_minutes))
+            if remaining_distance > 0
+            else 0
         ),
         "estimated_time_hours": round(
             estimated_hours,
@@ -242,7 +331,7 @@ def get_truck_eta(
 @router.get("/{truck_id}/route-deviation")
 def check_route_deviation(
     truck_id: int,
-    deviation_limit_km: int = 50,
+    deviation_limit_km: float = 0.5,
     db: Session = Depends(get_db)
 ):
     gps_record = (
@@ -295,107 +384,205 @@ def check_route_deviation(
             detail="Delivery coordinates are missing"
         )
 
-    depot_lat = 19.0760
-    depot_lon = 72.8777
+    try:
+        current_lat = float(gps_record.latitude)
+        current_lon = float(gps_record.longitude)
+
+        delivery_lat = float(order.delivery_latitude)
+        delivery_lon = float(order.delivery_longitude)
+
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid GPS or delivery coordinates"
+        )
+
+
+    # Compare current GPS location with the ORIGINAL planned route.
+    if not isinstance(trip.planned_route, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="Planned route is missing for this trip"
+        )
+
+    coordinates = trip.planned_route.get("coordinates", [])
+
+    if not coordinates:
+        raise HTTPException(
+            status_code=400,
+            detail="Planned route has no coordinates"
+        )
 
     current_lat = float(gps_record.latitude)
     current_lon = float(gps_record.longitude)
 
-    delivery_lat = float(order.delivery_latitude)
-    delivery_lon = float(order.delivery_longitude)
 
-    # Distance from current GPS position to the delivery location
-    lat1 = radians(current_lat)
-    lon1 = radians(current_lon)
-    lat2 = radians(delivery_lat)
-    lon2 = radians(delivery_lon)
+    # Find the shortest distance to any planned route segment.
+    min_deviation_km = float("inf")
 
-    dlat = lat2 - lat1
-    dlon = lon2 - lon1
+    if len(coordinates) == 1:
+        route_lon, route_lat = coordinates[0]
 
-    a = (
-        sin(dlat / 2) ** 2
-        + cos(lat1)
-        * cos(lat2)
-        * sin(dlon / 2) ** 2
-    )
-
-    c = 2 * atan2(
-        sqrt(a),
-        sqrt(1 - a)
-    )
-
-    earth_radius = 6371.0
-
-    remaining_distance = earth_radius * c
-
-    # Simple V1 deviation rule
-    
-
-    # Compare current position with the direct
-    # depot-to-delivery distance.
-    depot_lat_r = radians(depot_lat)
-    depot_lon_r = radians(depot_lon)
-
-    dlat_depot = lat2 - depot_lat_r
-    dlon_depot = lon2 - depot_lon_r
-
-    a_depot = (
-        sin(dlat_depot / 2) ** 2
-        + cos(depot_lat_r)
-        * cos(lat2)
-        * sin(dlon_depot / 2) ** 2
-    )
-
-    c_depot = 2 * atan2(
-        sqrt(a_depot),
-        sqrt(1 - a_depot)
-    )
-
-    route_distance = earth_radius * c_depot
-
-    current_from_depot_lat = radians(current_lat)
-    current_from_depot_lon = radians(current_lon)
-
-    dlat_current = current_from_depot_lat - depot_lat_r
-    dlon_current = current_from_depot_lon - depot_lon_r
-
-    a_current = (
-        sin(dlat_current / 2) ** 2
-        + cos(depot_lat_r)
-        * cos(current_from_depot_lat)
-        * sin(dlon_current / 2) ** 2
-    )
-
-    c_current = 2 * atan2(
-        sqrt(a_current),
-        sqrt(1 - a_current)
-    )
-
-    distance_from_depot = earth_radius * c_current
-
-    deviation_distance = abs(
-        route_distance
-        - (
-            distance_from_depot
-            + remaining_distance
+        min_deviation_km = distance_to_segment_km(
+            current_lat,
+            current_lon,
+            float(route_lat),
+            float(route_lon),
+            float(route_lat),
+            float(route_lon)
         )
-    )
+    else:
+        for i in range(len(coordinates) - 1):
+            start_lon, start_lat = coordinates[i]
+            end_lon, end_lat = coordinates[i + 1]
 
-    is_deviated = deviation_distance > deviation_limit_km
+            distance_km = distance_to_segment_km(
+                current_lat,
+                current_lon,
+                float(start_lat),
+                float(start_lon),
+                float(end_lat),
+                float(end_lon)
+            )
+
+            min_deviation_km = min(
+                min_deviation_km,
+                distance_km
+            )
+
+    is_deviated = min_deviation_km > deviation_limit_km
+
+
+    for point in coordinates:
+        route_lon, route_lat = float(point[0]), float(point[1])
+
+        lat1 = radians(current_lat)
+        lon1 = radians(current_lon)
+        lat2 = radians(route_lat)
+        lon2 = radians(route_lon)
+
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+
+        a = (
+            sin(dlat / 2) ** 2
+            + cos(lat1) * cos(lat2) * sin(dlon / 2) ** 2
+        )
+
+        c = 2 * atan2(
+            sqrt(a),
+            sqrt(max(0.0, 1 - a))
+        )
+
+        distance_km = 6371.0 * c
+        min_deviation_km = min(
+            min_deviation_km,
+            distance_km
+        )
+
+    is_deviated = min_deviation_km > deviation_limit_km
 
     return {
         "truck_id": truck_id,
         "trip_id": trip.id,
-        "order_id": order.id,
-        "deviation_distance_km": round(
-            deviation_distance,
-            2
-        ),
+        "order_id": trip.order_id,
+        "deviation_distance_km": round(min_deviation_km, 3),
         "deviation_limit_km": deviation_limit_km,
-        "status": (
-            "deviated"
-            if is_deviated
-            else "on_route"
+        "planned_route_distance_km": trip.planned_route.get(
+            "distance_km"
+        ),
+        "route_points": len(coordinates),
+        "status": "deviated" if is_deviated else "on_route"
+    }
+
+
+@router.get("/{truck_id}/direction")
+def get_truck_direction(
+    truck_id: int,
+    db: Session = Depends(get_db)
+):
+    records = (
+        db.query(GPSTracking)
+        .filter(GPSTracking.truck_id == truck_id)
+        .order_by(GPSTracking.id.desc())
+        .limit(2)
+        .all()
+    )
+
+    if len(records) < 2:
+        raise HTTPException(
+            status_code=404,
+            detail="At least two GPS records are required"
+        )
+
+    current = records[0]
+    previous = records[1]
+
+    try:
+        prev_lat = float(previous.latitude.strip())
+        prev_lon = float(previous.longitude.strip())
+        curr_lat = float(current.latitude.strip())
+        curr_lon = float(current.longitude.strip())
+    except (ValueError, AttributeError):
+        raise HTTPException(
+            status_code=400,
+            detail="GPS coordinates must be numeric"
+        )
+
+    if not (
+        -90 <= prev_lat <= 90
+        and -90 <= curr_lat <= 90
+        and -180 <= prev_lon <= 180
+        and -180 <= curr_lon <= 180
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="GPS coordinates are out of range"
+        )
+
+    north_south = curr_lat - prev_lat
+    east_west = curr_lon - prev_lon
+
+    # Ignore tiny changes caused by GPS measurement noise.
+    threshold = 0.00001
+
+    if abs(north_south) < threshold:
+        north_south = 0
+
+    # Handle longitude wrapping near the International Date Line.
+    east_west = (
+        (east_west + 180) % 360
+    ) - 180
+
+    if abs(east_west) < threshold:
+        east_west = 0
+
+    if north_south == 0 and east_west == 0:
+        direction = "stationary_or_no_significant_change"
+    else:
+        parts = []
+
+        if north_south > 0:
+            parts.append("north")
+        elif north_south < 0:
+            parts.append("south")
+
+        if east_west > 0:
+            parts.append("east")
+        elif east_west < 0:
+            parts.append("west")
+
+        direction = "-".join(parts)
+
+    return {
+        "truck_id": truck_id,
+        "previous_gps_id": previous.id,
+        "current_gps_id": current.id,
+        "direction": direction,
+        "latitude_change": round(
+            curr_lat - prev_lat, 6
+        ),
+        "longitude_change": round(
+            east_west, 6
         )
     }

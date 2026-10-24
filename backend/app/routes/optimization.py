@@ -1,10 +1,11 @@
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-
+from app.optimization.road_route import get_road_route
+from app.optimization.depot import DEPOT_LATITUDE, DEPOT_LONGITUDE
 from app.database.connection import get_db
 from app.database.models import Truck, Driver, Order, Trip
-
+from datetime import date, datetime, timedelta
 from app.optimization.load_optimizer import optimize_loads
 from app.optimization.load_optimizer_v2 import optimize_loads_v2
 from app.optimization.load_optimizer_v3 import optimize_loads_v3
@@ -12,12 +13,49 @@ from app.optimization.load_optimizer_v4 import optimize_loads_v4
 from app.optimization.route_optimizer import optimize_route
 from app.optimization.fleet_route_optimizer import optimize_fleet_routes
 from app.optimization.distance_matrix import build_distance_matrix
-
+from math import isfinite
 
 router = APIRouter(
     prefix="/optimization",
     tags=["Optimization"]
 )
+
+
+
+def parse_order_deadline(deadline_value):
+    """Return (deadline, is_date_only)."""
+    if not deadline_value:
+        return None, None
+
+    deadline_string = str(deadline_value).strip()
+
+    # ISO date-only format: 2026-10-30
+    try:
+        deadline_date = date.fromisoformat(deadline_string)
+        return deadline_date, True
+    except ValueError:
+        pass
+
+    # Legacy date-only formats.
+    for date_format in ("%d-%m-%y", "%d-%m-%Y"):
+        try:
+            deadline_date = datetime.strptime(
+                deadline_string, date_format
+            ).date()
+            return deadline_date, True
+        except ValueError:
+            continue
+
+    # ISO date-time format.
+    try:
+        deadline_datetime = datetime.fromisoformat(
+            deadline_string.replace("Z", "+00:00")
+        )
+        return deadline_datetime, False
+    except ValueError as exc:
+        raise ValueError(
+            f"Unsupported deadline format: {deadline_string}"
+        ) from exc
 
 
 # V1
@@ -197,7 +235,7 @@ def calculate_route(
     fuel_price: int = 90,
     db: Session = Depends(get_db)
 ):
-    orders = (
+    all_pending_orders = (
         db.query(Order)
         .filter(Order.status == "pending")
         .all()
@@ -215,6 +253,23 @@ def calculate_route(
      return {
         "message": "Available truck not found"
     }
+    orders = []
+
+    for order in all_pending_orders:
+        try:
+            weight = float(order.weight)
+            latitude = float(order.delivery_latitude)
+            longitude = float(order.delivery_longitude)
+        except (TypeError, ValueError):
+            continue
+
+        if (
+            weight > 0
+            and weight <= truck.capacity
+            and -90 <= latitude <= 90
+            and -180 <= longitude <= 180
+        ):
+            orders.append(order)
 
     if not orders:
         return {
@@ -233,6 +288,19 @@ def calculate_route(
          return {
            "message": "Available driver not found"
     }
+
+
+    if driver.company_id != truck.company_id:
+        return {
+            "status": "assignment_not_allowed",
+            "message": (
+                "The selected truck and driver "
+                "must belong to the same company."
+            ),
+            "truck_id": truck.id,
+            "driver_id": driver.id
+        }
+
 
     distance_matrix = build_distance_matrix(orders)
 
@@ -254,7 +322,7 @@ def calculate_route(
     estimated_driving_hours = (
     result["total_distance"] / average_speed_kmh
 )
-   
+
 
     if truck.fuel_efficiency and truck.fuel_efficiency > 0:
         fuel_used_liters = (
@@ -280,7 +348,7 @@ def calculate_route(
             estimated_driving_hours,
             2
         )
-        
+
     }
     for location in result["route"]:
 
@@ -296,7 +364,7 @@ def calculate_route(
             db.query(Trip)
             .filter(
                 Trip.order_id == order.id,
-                Trip.status == "planned"
+                Trip.status.in_(["planned", "in_progress"])
             )
             .first()
         )
@@ -321,6 +389,13 @@ def calculate_route(
             order_fuel_liters * fuel_price
         )
 
+        road_route = get_road_route(
+            DEPOT_LATITUDE,
+            DEPOT_LONGITUDE,
+            float(order.delivery_latitude),
+            float(order.delivery_longitude)
+        )
+
         trip = Trip(
             truck_id=truck.id,
             driver_id=driver.id,
@@ -332,12 +407,18 @@ def calculate_route(
             fuel_cost=int(
                 order_fuel_cost
             ),
-            status="planned"
+            status="planned",
+            planned_route={
+                "coordinates": road_route["coordinates"],
+                "distance_km": road_route["distance_km"],
+                "duration_minutes": road_route["duration_minutes"]
+            }
         )
 
         db.add(trip)
         order.status = "assigned"
         truck.status = "assigned"
+        driver.status = "busy"
 
     db.commit()
     route_details = []
@@ -422,37 +503,140 @@ def calculate_fleet_route(
     if not orders:
         return {"message": "No pending orders found"}
 
-    # Exclude orders that cannot fit any available truck.
+        # Keep only trucks that have an available driver
+    # from the same company.
+    compatible_trucks = [
+        truck
+        for truck in trucks
+        if any(
+            driver.company_id == truck.company_id
+            for driver in drivers
+        )
+    ]
+
+    if not compatible_trucks:
+        return {
+            "status": "fleet_not_feasible",
+            "message": (
+                "No available truck has a compatible "
+                "available driver from the same company."
+            )
+        }
+
+    trucks = compatible_trucks
+
+
+    # Exclude orders that cannot be safely routed or assigned.
     max_capacity = max(
         (float(truck.capacity or 0) for truck in trucks),
         default=0
     )
 
     eligible_orders = []
+    excluded_order_details = []
+
+
+    # Exclude orders that already have active trips.
+    active_order_ids = {
+        order_id
+        for (order_id,) in (
+            db.query(Trip.order_id)
+            .filter(
+                Trip.status.in_(["planned", "in_progress"])
+            )
+            .all()
+        )
+        if order_id is not None
+    }
+
+    # for order in orders:
+    #     if order.id in active_order_ids:
+    #         excluded_order_details.append({
+    #             "order_id": order.id,
+    #             "reason": (
+    #                 "Order already has a planned or in-progress trip"
+    #             )
+    #         })
+    #         continue
+
+    #     try:
+    #         weight = float(order.weight)
+    #         latitude = float(order.delivery_latitude)
+    #         longitude = float(order.delivery_longitude)
+    #     except (TypeError, ValueError):
+    #         excluded_order_details.append({
+    #             "order_id": order.id,
+    #             "reason": "Missing or invalid weight/coordinates"
+    #         })
+    #         continue
+
+
 
     for order in orders:
-        try:
-            weight = float(order.weight)
-        except (TypeError, ValueError):
+        if order.id in active_order_ids:
+            excluded_order_details.append({
+                "order_id": order.id,
+                "reason": (
+                    "Order already has a planned or in-progress trip"
+                )
+            })
             continue
 
-        if weight > 0 and weight <= max_capacity:
-            eligible_orders.append(order)
+        try:
+            weight = float(order.weight)
+            latitude = float(order.delivery_latitude)
+            longitude = float(order.delivery_longitude)
+        except (TypeError, ValueError):
+            excluded_order_details.append({
+                "order_id": order.id,
+                "reason": "Missing or invalid weight/coordinates"
+            })
+            continue
+        if not all(isfinite(value) for value in (weight, latitude, longitude)):
+            excluded_order_details.append({
+                "order_id": order.id,
+                "reason": "Weight or coordinates must be finite numbers"
+            })
+            continue
+        if not (-90 <= latitude <= 90):
+            excluded_order_details.append({
+                "order_id": order.id,
+                "reason": "Invalid delivery latitude"
+            })
+            continue
+
+        if not (-180 <= longitude <= 180):
+            excluded_order_details.append({
+                "order_id": order.id,
+                "reason": "Invalid delivery longitude"
+            })
+            continue
+
+        if weight <= 0 or weight > max_capacity:
+            excluded_order_details.append({
+                "order_id": order.id,
+                "reason": "Invalid weight or exceeds available capacity"
+            })
+            continue
+
+        eligible_orders.append(order)
 
 
     if not eligible_orders:
         return {
             "status": "route_not_feasible",
-            "message": "No pending orders fit the available trucks."
+            "message": "No pending orders fit the available trucks.",
+            "excluded_orders": excluded_order_details
         }
 
     distance_matrix = build_distance_matrix(eligible_orders)
 
     result = optimize_fleet_routes(
-        distance_matrix,
-        eligible_orders,
-        trucks
-    )
+     distance_matrix,
+     eligible_orders,
+     trucks,
+     drivers
+)
 
     if result.get("status") == "route_not_feasible":
         return result
@@ -477,8 +661,8 @@ def calculate_fleet_route(
     # Validate routes before making database changes.
     routes = []
     validated_routes = []
+    late_orders = []
     average_speed_kmh = 50
-
     for route_number, route_data in enumerate(route_data_list):
         truck_index = route_data.get("truck_index")
 
@@ -493,8 +677,46 @@ def calculate_fleet_route(
                 "truck_index": truck_index
             }
 
+
         truck = trucks[truck_index]
-        driver = drivers[route_number]
+
+
+        # Select a compatible, unused driver who has enough working hours.
+        assigned_driver_ids = {
+            route["driver"].id
+            for route in validated_routes
+        }
+
+        # Convert optimizer route distance to estimated driving hours.
+        total_distance = route_data["total_distance"]
+        estimated_driving_hours = (
+            total_distance / average_speed_kmh
+        )
+
+        driver = next(
+            (
+                candidate
+                for candidate in drivers
+                if candidate.company_id == truck.company_id
+                and candidate.id not in assigned_driver_ids
+                and candidate.working_hours is not None
+                and candidate.working_hours >= estimated_driving_hours
+            ),
+            None
+        )
+
+        if driver is None:
+            return {
+                "status": "fleet_not_feasible",
+                "message": (
+                    "No unused compatible driver has enough "
+                    "working hours for this route."
+                ),
+                "truck_id": truck.id,
+                "estimated_driving_hours": round(
+                    estimated_driving_hours, 2
+                )
+            }
 
         # Convert optimizer route locations into actual orders.
         route_order_ids = []
@@ -525,10 +747,16 @@ def calculate_fleet_route(
                 "order_ids": route_order_ids
             }
 
-        total_distance = route_data["total_distance"]
-        estimated_driving_hours = (
-            total_distance / average_speed_kmh
-        )
+        # total_distance = route_data["total_distance"]
+        # estimated_driving_hours = (
+        #     total_distance / average_speed_kmh
+        # )
+        print("Truck ID:", truck.id)
+        print("Route distance in km:", total_distance)
+        print("Driver ID:", driver.id)
+        print("Total distance:", total_distance)
+        print("Estimated driving hours:", estimated_driving_hours)
+        print("Driver working hours:", driver.working_hours)
 
         if (
             driver.working_hours is not None
@@ -555,23 +783,20 @@ def calculate_fleet_route(
             fuel_used_liters = 0
             fuel_cost = 0
 
-        # Check deadlines before creating any trips.
+
+
+        # Check each selected order's deadline before assignment.
+        late_route_orders = []
+
         for order in route_orders:
             if not order.deadline:
                 continue
 
             try:
-                deadline_string = order.deadline.strip()
-
-                # Supports YYYY-MM-DD and DD-MM-YY formats.
-                try:
-                    deadline = datetime.fromisoformat(deadline_string)
-                except ValueError:
-                    deadline = datetime.strptime(
-                        deadline_string, "%d-%m-%y"
-                    )
-
-            except (ValueError, AttributeError):
+                deadline, is_date_only = parse_order_deadline(
+                    order.deadline
+                )
+            except ValueError:
                 return {
                     "status": "invalid_order_deadline",
                     "message": "Invalid deadline format.",
@@ -579,31 +804,48 @@ def calculate_fleet_route(
                     "deadline": order.deadline
                 }
 
-            order_distance = order.distance_km or 0
+            # Use the OSRM duration for this order's delivery.
+            road_route = get_road_route(
+                DEPOT_LATITUDE,
+                DEPOT_LONGITUDE,
+                float(order.delivery_latitude),
+                float(order.delivery_longitude)
+            )
+
             estimated_delivery_time = (
                 datetime.now()
                 + timedelta(
-                    hours=order_distance / average_speed_kmh
+                    minutes=road_route["duration_minutes"]
                 )
             )
 
-            # Compare calendar dates when the deadline has no time.
-            if "T" not in deadline_string and " " not in deadline_string:
+            if is_date_only:
                 is_late = (
-                    estimated_delivery_time.date() > deadline.date()
+                    estimated_delivery_time.date() > deadline
                 )
             else:
-                is_late = estimated_delivery_time > deadline
+                if deadline.tzinfo is not None:
+                    estimated_delivery_time = (
+                        estimated_delivery_time.astimezone(
+                            deadline.tzinfo
+                        )
+                    )
+
+                is_late = (
+                    estimated_delivery_time > deadline
+                )
 
             if is_late:
-                return {
-                    "status": "fleet_not_feasible",
-                    "message": "Order cannot be delivered before deadline.",
+                late_route_orders.append({
                     "order_id": order.id,
                     "deadline": order.deadline,
                     "estimated_delivery_time":
                         estimated_delivery_time.isoformat()
-                }
+                })
+
+        if late_route_orders:
+            late_orders.extend(late_route_orders)
+            continue
 
         routes.append({
             "truck_id": truck.id,
@@ -628,6 +870,7 @@ def calculate_fleet_route(
             "driver": driver,
             "orders": route_orders
         })
+
 
     # Create trips only after every route passes validation.
     try:
@@ -663,6 +906,15 @@ def calculate_fleet_route(
                         order_distance / truck.fuel_efficiency
                     )
 
+
+                # Get the planned road route for this delivery.
+                road_route = get_road_route(
+                    DEPOT_LATITUDE,
+                    DEPOT_LONGITUDE,
+                    float(order.delivery_latitude),
+                    float(order.delivery_longitude)
+                )
+
                 trip = Trip(
                     truck_id=truck.id,
                     driver_id=driver.id,
@@ -670,8 +922,14 @@ def calculate_fleet_route(
                     distance=order_distance,
                     estimated_time=int(order_time_hours * 60),
                     fuel_cost=int(order_fuel_liters * fuel_price),
-                    status="planned"
+                    status="planned",
+                    planned_route={
+                        "coordinates": road_route["coordinates"],
+                        "distance_km": road_route["distance_km"],
+                        "duration_minutes": road_route["duration_minutes"]
+                    }
                 )
+
 
                 db.add(trip)
                 order.status = "assigned"
@@ -689,13 +947,11 @@ def calculate_fleet_route(
         "status": result.get("status", "success"),
         "fuel_price_per_liter": fuel_price,
         "routes": routes,
-        "excluded_orders": [
-            {
-                "order_id": order.id,
-                "weight": order.weight,
-                "reason": "Exceeds every available truck's capacity"
-            }
-            for order in orders
-            if order not in eligible_orders
-        ]
+        "unassigned_order_ids": result.get(
+            "unassigned_order_ids", []
+        ),
+        "late_orders": late_orders,
+
+        "excluded_orders": excluded_order_details
+
     }

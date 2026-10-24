@@ -72,6 +72,12 @@ class Driver(Base):
     company = relationship("Company", back_populates="drivers")
     trips = relationship("Trip", back_populates="driver")
 
+    trip_assignments = relationship(
+        "TripDriverAssignment",
+        back_populates="driver",
+        cascade="all, delete-orphan"
+    )
+
 
 class Order(Base):
     __tablename__ = "orders"
@@ -114,6 +120,13 @@ class Trip(Base):
     order = relationship("Order", back_populates="trips")
 
     daily_schedule = Column(JSON, nullable=True)
+    planned_route = Column(JSON, nullable=True)
+
+    driver_assignments = relationship(
+        "TripDriverAssignment",
+        back_populates="trip",
+        cascade="all, delete-orphan"
+    )
 
 
 class Maintenance(Base):
@@ -151,4 +164,39 @@ class GPSTracking(Base):
     truck = relationship(
         "Truck",
         back_populates="gps_records"
+    )
+
+class TripDriverAssignment(Base):
+    __tablename__ = "trip_driver_assignments"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    trip_id = Column(
+        Integer,
+        ForeignKey("trips.id"),
+        nullable=False
+    )
+
+    driver_id = Column(
+        Integer,
+        ForeignKey("drivers.id"),
+        nullable=False
+    )
+
+    segment_start_km = Column(Float, nullable=False)
+    segment_end_km = Column(Float, nullable=False)
+
+    start_time = Column(String(50), nullable=False)
+    end_time = Column(String(50), nullable=False)
+
+    status = Column(String(30), default="planned")
+
+    trip = relationship(
+        "Trip",
+        back_populates="driver_assignments"
+    )
+
+    driver = relationship(
+        "Driver",
+        back_populates="trip_assignments"
     )

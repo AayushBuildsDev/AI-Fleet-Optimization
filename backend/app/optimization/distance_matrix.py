@@ -94,13 +94,15 @@ def build_distance_matrix(orders):
                 matrix[i][j] = 0
                 continue
 
+
             matrix[i][j] = int(
                 calculate_distance(
                     lat1,
                     lon1,
                     lat2,
                     lon2
-                )
+                ) * 100
             )
+
 
     return matrix
